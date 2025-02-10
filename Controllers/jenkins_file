@@ -1,2 +1,88 @@
-pipeline
-agent any {
+pipeline {
+    agent any
+    environment {
+        SONARQUBE_SCANNER_HOME = tool(name: 'SonarQube_Scanner')
+        SONAR_PROJECT_KEY = 'React.js'
+        GITHUB_REPO = 'https://github.com/simonebinezer/React.js.git'
+        SONAR_HOST_URL = 'http://54.189.47.219:9888'
+        SONAR_TOKEN = credentials('Sonar_Token') // Replace with the ID of your SonarQube token
+        TARGET_SERVER = 'ec2-user@ec2-34-220-228-240.us-west-2.compute.amazonaws.com'
+        TARGET_PATH = '/home/ec2-user/'
+        SSH_KEY_PATH = '/var/jenkins_home/.ssh/id_rsa'
+        ZIP_FILE_NAME = 'app.zip'
+    }
+
+    stages {
+        stage('Checkout Code') {
+            steps {
+                echo 'Checking out code from GitHub...'
+                git branch: 'main', url: "${GITHUB_REPO}"
+            }
+        }
+
+         stage('Build & SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {                 // Matches the SonarQube instance name in Jenkins
+                    echo "Starting SonarQube analysis..."
+                    withCredentials([string(credentialsId: 'Sonar_Token', variable: 'SONAR_TOKEN')]) {
+                        sh """
+                            ${SONARQUBE_SCANNER_HOME}/bin/sonar-scanner \
+                                -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+                                -Dsonar.projectName="React.js" \
+                                -Dsonar.projectVersion="1.0" \
+                                -Dsonar.sources=. \
+                                -Dsonar.host.url="${SONAR_HOST_URL}" \
+                                -Dsonar.login=${SONAR_TOKEN}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Archive and Transfer Zip File') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    script {
+                        // Ensure the src folder exists
+                        echo "Archiving source folder into ${ZIP_FILE_NAME}..."
+                        sh """
+                            if [ ! -d app ]; then
+                                echo "Error: Directory 'app/' not found!" >&2
+                                exit 1
+                            fi
+                            zip -r ${ZIP_FILE_NAME} app/
+                        """
+
+                        echo "Transferring ${ZIP_FILE_NAME} to the target server..."
+                        sh """
+                            scp -v -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${ZIP_FILE_NAME} ${TARGET_SERVER}:${TARGET_PATH}
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Extract File on Target Server') {
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    script {
+                        echo "Extracting ${ZIP_FILE_NAME} on the target server..."
+                        sh """
+                            ssh -i ${SSH_KEY_PATH} -o StrictHostKeyChecking=no ${TARGET_SERVER} \
+                            'unzip -o ${TARGET_PATH}/${ZIP_FILE_NAME} -d ${TARGET_PATH} && rm -f ${TARGET_PATH}/${ZIP_FILE_NAME}'
+                        """
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            echo 'Pipeline execution completed!'
+        }
+        failure {
+            echo 'Pipeline failed. Check the logs for details.'
+        }
+    }
+}
